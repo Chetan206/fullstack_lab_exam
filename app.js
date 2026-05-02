@@ -1,14 +1,37 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const { nanoid } = require('nanoid');
 
 const app = express();
 const port = process.env.PORT || 3000;
+const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/url_shortener';
 
 app.use(express.json());
 
-const urlStore = new Map();
+const urlSchema = new mongoose.Schema({
+  shortId: {
+    type: String,
+    required: true,
+    unique: true,
+    index: true,
+  },
+  longUrl: {
+    type: String,
+    required: true,
+  },
+  accessCount: {
+    type: Number,
+    default: 0,
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
 
-app.post('/shortUrl', (req, res) => {
+const ShortUrl = mongoose.model('ShortUrl', urlSchema);
+
+app.post('/shortUrl', async (req, res) => {
   try {
     const { longUrl } = req.body;
     if (!longUrl || typeof longUrl !== 'string') {
@@ -16,13 +39,8 @@ app.post('/shortUrl', (req, res) => {
     }
 
     const shortId = nanoid(8);
-    const record = {
-      shortId,
-      longUrl,
-      accessCount: 0,
-      createdAt: new Date(),
-    };
-    urlStore.set(shortId, record);
+    const record = new ShortUrl({ shortId, longUrl });
+    await record.save();
 
     res.status(201).json({
       shortId,
@@ -31,35 +49,35 @@ app.post('/shortUrl', (req, res) => {
       accessCount: record.accessCount,
     });
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ error: 'Short ID already exists. Please retry.' });
+    }
     res.status(500).json({ error: 'Failed to create short URL.' });
   }
 });
 
-app.get('/:shortId', (req, res) => {
+app.get('/:shortId', async (req, res) => {
   try {
     const { shortId } = req.params;
-    const record = urlStore.get(shortId);
+    const record = await ShortUrl.findOneAndUpdate(
+      { shortId },
+      { $inc: { accessCount: 1 } },
+      { new: true }
+    );
 
     if (!record) {
       return res.status(404).json({ error: 'Short URL not found.' });
     }
 
-    record.accessCount += 1;
     res.redirect(record.longUrl);
   } catch (error) {
     res.status(500).json({ error: 'Failed to redirect to long URL.' });
   }
 });
 
-app.patch('/:shortId', (req, res) => {
+app.patch('/:shortId', async (req, res) => {
   try {
     const { shortId } = req.params;
-    const record = urlStore.get(shortId);
-
-    if (!record) {
-      return res.status(404).json({ error: 'Short URL not found.' });
-    }
-
     const updates = {};
     const { longUrl, accessCount } = req.body;
 
@@ -67,14 +85,23 @@ app.patch('/:shortId', (req, res) => {
       if (!longUrl || typeof longUrl !== 'string') {
         return res.status(400).json({ error: 'longUrl must be a non-empty string.' });
       }
-      record.longUrl = longUrl;
+      updates.longUrl = longUrl;
     }
 
     if (accessCount !== undefined) {
       if (!Number.isInteger(accessCount) || accessCount < 0) {
         return res.status(400).json({ error: 'accessCount must be a non-negative integer.' });
       }
-      record.accessCount = accessCount;
+      updates.accessCount = accessCount;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'Provide longUrl or accessCount to update.' });
+    }
+
+    const record = await ShortUrl.findOneAndUpdate({ shortId }, updates, { new: true });
+    if (!record) {
+      return res.status(404).json({ error: 'Short URL not found.' });
     }
 
     res.json(record);
@@ -83,6 +110,15 @@ app.patch('/:shortId', (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`URL shortener running on http://localhost:${port}`);
-});
+mongoose
+  .connect(mongoUri)
+  .then(() => {
+    console.log('Connected to MongoDB');
+    app.listen(port, () => {
+      console.log(`URL shortener running on http://localhost:${port}`);
+    });
+  })
+  .catch((error) => {
+    console.error('MongoDB connection error:', error.message);
+    process.exit(1);
+  });
